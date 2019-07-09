@@ -52,6 +52,7 @@ type ReplaceDocx struct {
 	links     string
 	headers   map[string]string
 	footers   map[string]string
+	media     map[string][]byte
 }
 
 func (r *ReplaceDocx) Editable() *Docx {
@@ -61,6 +62,7 @@ func (r *ReplaceDocx) Editable() *Docx {
 		links:   r.links,
 		headers: r.headers,
 		footers: r.footers,
+		media:   r.media,
 	}
 }
 
@@ -74,10 +76,20 @@ type Docx struct {
 	links   string
 	headers map[string]string
 	footers map[string]string
+	media   map[string][]byte
 }
 
 func (d *Docx) ReplaceRaw(oldString string, newString string, num int) {
 	d.content = strings.Replace(d.content, oldString, newString, num)
+}
+
+func (d *Docx) ReplaceMedia(name string, content []byte) error {
+	for _, f := range d.files {
+		if strings.Contains(f.Name, name) && len(d.media[f.Name]) > 0 {
+			d.media[f.Name] = content
+		}
+	}
+	return nil
 }
 
 func (d *Docx) Replace(oldString string, newString string, num int) (err error) {
@@ -149,6 +161,8 @@ func (d *Docx) Write(ioWriter io.Writer) (err error) {
 			writer.Write([]byte(d.headers[file.Name]))
 		} else if strings.Contains(file.Name, "footer") && d.footers[file.Name] != "" {
 			writer.Write([]byte(d.footers[file.Name]))
+		} else if strings.Contains(file.Name, "image") && len(d.media[file.Name]) > 0 {
+			writer.Write(d.media[file.Name])
 		} else {
 			writer.Write(streamToByte(readCloser))
 		}
@@ -203,29 +217,53 @@ func ReadDocx(reader ZipData) (*ReplaceDocx, error) {
 		return nil, err
 	}
 
-	headers, footers, _ := readHeaderFooter(reader.files())
-	return &ReplaceDocx{zipReader: reader, content: content, links: links, headers: headers, footers: footers}, nil
+	headers, footers, media, _ := readHeaderFooter(reader.files())
+	return &ReplaceDocx{zipReader: reader, content: content, links: links, headers: headers, footers: footers, media: media}, nil
 }
 
-func readHeaderFooter(files []*zip.File) (headerText map[string]string, footerText map[string]string, err error) {
+func readHeaderFooter(files []*zip.File) (headerText map[string]string, footerText map[string]string, imageByte map[string][]byte, err error) {
 
-	h, f, err := retrieveHeaderFooterDoc(files)
+	h, f, m, err := retrieveHeaderFooterDoc(files)
 
 	if err != nil {
-		return map[string]string{}, map[string]string{}, err
+		return map[string]string{}, map[string]string{}, map[string][]byte{}, err
 	}
 
 	headerText, err = buildHeaderFooter(h)
 	if err != nil {
-		return map[string]string{}, map[string]string{}, err
+		return map[string]string{}, map[string]string{}, map[string][]byte{}, err
 	}
 
 	footerText, err = buildHeaderFooter(f)
 	if err != nil {
-		return map[string]string{}, map[string]string{}, err
+		return map[string]string{}, map[string]string{}, map[string][]byte{}, err
 	}
 
-	return headerText, footerText, err
+	imageByte, err = buildMedia(m)
+	if err != nil {
+		return map[string]string{}, map[string]string{}, map[string][]byte{}, err
+	}
+
+	return headerText, footerText, imageByte, err
+}
+
+func buildMedia(media []*zip.File) (map[string][]byte, error) {
+	imageByte := make(map[string][]byte)
+	for _, element := range media {
+		documentReader, err := element.Open()
+		if err != nil {
+			return map[string][]byte{}, err
+		}
+
+		b, err := ioutil.ReadAll(documentReader)
+		if err != nil {
+			return map[string][]byte{}, err
+		}
+
+		imageByte[element.Name] = b
+	}
+
+	return imageByte, nil
 }
 
 func buildHeaderFooter(headerFooter []*zip.File) (map[string]string, error) {
@@ -312,7 +350,7 @@ func retrieveLinkDoc(files []*zip.File) (file *zip.File, err error) {
 	return
 }
 
-func retrieveHeaderFooterDoc(files []*zip.File) (headers []*zip.File, footers []*zip.File, err error) {
+func retrieveHeaderFooterDoc(files []*zip.File) (headers []*zip.File, footers []*zip.File, media []*zip.File, err error) {
 	for _, f := range files {
 
 		if strings.Contains(f.Name, "header") {
@@ -321,9 +359,9 @@ func retrieveHeaderFooterDoc(files []*zip.File) (headers []*zip.File, footers []
 		if strings.Contains(f.Name, "footer") {
 			footers = append(footers, f)
 		}
-	}
-	if len(headers) == 0 && len(footers) == 0 {
-		err = errors.New("headers[1-3].xml file not found and footers[1-3].xml file not found.")
+		if strings.Contains(f.Name, "media") {
+			media = append(media, f)
+		}
 	}
 	return
 }
